@@ -3,69 +3,85 @@ using ZwiftPlayConsoleApp.Logging;
 using ZwiftPlayConsoleApp.Zap;
 using ZwiftPlayConsoleApp.Configuration;
 using System.Collections.Concurrent;
+using ZwiftPlayConsoleApp.Utils;
 
 namespace ZwiftPlayConsoleApp.BLE;
-
-public partial class ZwiftPlayBleManager : IDisposable
-{
-    private readonly ZwiftPlayDevice _zapDevice;
-    private readonly BluetoothDevice _device;
-    private readonly bool _isLeft;
-    private readonly IZwiftLogger _logger;
-    private bool _isDisposed;
-    private readonly object _lock = new();
-    private readonly Config _config;
-    private static GattCharacteristic? _asyncCharacteristic;
-    private static GattCharacteristic? _syncRxCharacteristic;
-    private static GattCharacteristic? _syncTxCharacteristic;
-    private DateTime _lastProcessTime = DateTime.MinValue;
-    private const int MINIMUM_PROCESS_INTERVAL_MS = 16; // ~60Hz
-    private readonly ConcurrentQueue<(string source, byte[] value)> _characteristicQueue = new();
-    private readonly Thread _processingThread;
-    public ZwiftPlayBleManager(BluetoothDevice device, bool isLeft, IZwiftLogger logger, Config config)
+  public partial class ZwiftPlayBleManager : IDisposable
+  {
+      private readonly ZwiftPlayDevice _zapDevice;
+      private readonly BluetoothDevice _device;
+      private readonly bool _isLeft;
+      private readonly IZwiftLogger _logger;
+      private bool _isDisposed;
+      private readonly object _lock = new();
+      private readonly Config _config;
+      private static GattCharacteristic? _asyncCharacteristic;
+      private static GattCharacteristic? _syncRxCharacteristic;
+      private static GattCharacteristic? _syncTxCharacteristic;
+      private DateTime _lastProcessTime = DateTime.MinValue;
+      private const int MINIMUM_PROCESS_INTERVAL_MS = 16; // ~60Hz
+      private readonly ConcurrentQueue<(string source, byte[] value)> _characteristicQueue = new();
+      private readonly Thread _processingThread;
+      private const int CONNECTION_INTERVAL = 11; // 1.25ms units
+      public ZwiftPlayBleManager(BluetoothDevice device, bool isLeft, IZwiftLogger logger, Config config)
+      {
+          _device = device;
+          _isLeft = isLeft;
+          _logger = new ConfigurableLogger(((ConfigurableLogger)logger)._config, nameof(ZwiftPlayBleManager));
+          _config = config;
+          _zapDevice = new ZwiftPlayDevice(new ConfigurableLogger(((ConfigurableLogger)logger)._config, nameof(ZwiftPlayDevice)), config);
+          _processingThread = new Thread(ProcessCharacteristicQueue) 
+          { 
+              IsBackground = true 
+          };
+          _processingThread.Start();
+      }
+    private static async Task SetConnectionParameters(RemoteGattServer gatt)
     {
-        _device = device;
-        _isLeft = isLeft;
-        _logger = new ConfigurableLogger(((ConfigurableLogger)logger)._config, nameof(ZwiftPlayBleManager));
-        _config = config;
-        _zapDevice = new ZwiftPlayDevice(new ConfigurableLogger(((ConfigurableLogger)logger)._config, nameof(ZwiftPlayDevice)), config);
-        _processingThread = new Thread(ProcessCharacteristicQueue) 
-        { 
-            IsBackground = true 
-        };
-        _processingThread.Start();
+        var service = await gatt.GetPrimaryServiceAsync(GenericBleUuids.GENERIC_ACCESS_SERVICE_UUID);
+        if (service == null) return;
+
+        var characteristic = await service.GetCharacteristicAsync(GenericBleUuids.PREFERRED_CONNECTION_PARAMS_CHARACTERISTIC_UUID);
+        if (characteristic == null || !characteristic.Properties.HasFlag(GattCharacteristicProperties.Write)) return;
+
+        var buffer = new ByteBuffer();
+        buffer.WriteInt16((short)CONNECTION_INTERVAL);
+        buffer.WriteInt16((short)(CONNECTION_INTERVAL * 2));
+        buffer.WriteInt16(0);
+        buffer.WriteInt16(300);
+
+        await characteristic.WriteValueWithResponseAsync(buffer.ToArray());
     }
+      public async Task ConnectAsync()
+      {
+          try
+          {
+              _isDisposed = false;  // Reset disposal state
+              var gatt = _device.Gatt;
+              await gatt.ConnectAsync();
 
-    public async Task ConnectAsync()
-    {
-        try
-        {
-            _isDisposed = false;  // Reset disposal state
-            var gatt = _device.Gatt;
-            await gatt.ConnectAsync();
+              if (gatt.IsConnected)
+              {
+                  await SetConnectionParameters(gatt);
+                  _zapDevice.ResetEncryption();
+                  _logger.LogInfo($"Connected {(_isLeft ? "Left" : "Right")} controller");
+                  await RegisterCharacteristics(gatt);
 
-            if (gatt.IsConnected)
-            {
-                _zapDevice.ResetEncryption();
-                _logger.LogInfo($"Connected {(_isLeft ? "Left" : "Right")} controller");
-                await RegisterCharacteristics(gatt);
-
-                if (_syncRxCharacteristic != null)
-                {
-                    var handshakeData = _zapDevice.BuildHandshakeStart();
-                    _logger.LogDebug($"Sending handshake data: {BitConverter.ToString(handshakeData)}");
-                    await _syncRxCharacteristic.WriteValueWithResponseAsync(handshakeData);
-                    _logger.LogInfo("Handshake initiated");
-                }
-
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError("Connection failed", ex);
-            throw;
-        }
-    }
+                  if (_syncRxCharacteristic != null)
+                  {
+                      var handshakeData = _zapDevice.BuildHandshakeStart();
+                      _logger.LogDebug($"Sending handshake data: {BitConverter.ToString(handshakeData)}");
+                      await _syncRxCharacteristic.WriteValueWithResponseAsync(handshakeData);
+                      _logger.LogInfo("Handshake initiated");
+                  }
+              }
+          }
+          catch (Exception ex)
+          {
+              _logger.LogError("Connection failed", ex);
+              throw;
+          }
+      }
     private async Task RegisterCharacteristics(RemoteGattServer gatt)
     {
         _logger.LogDebug("Starting characteristic registration");
@@ -84,25 +100,17 @@ public partial class ZwiftPlayBleManager : IDisposable
         if (_asyncCharacteristic != null)
         {
             await _asyncCharacteristic.StartNotificationsAsync();
-            _asyncCharacteristic.CharacteristicValueChanged += (sender, eventArgs) =>
-            {
-                _logger.LogDebug($"Async characteristic value changed: {BitConverter.ToString(eventArgs.Value)}");
-                ProcessCharacteristic("Async", eventArgs.Value);
-            };
+            _asyncCharacteristic.CharacteristicValueChanged += OnAsyncCharacteristicChanged;
         }
 
         if (_syncTxCharacteristic != null)
         {
             await _syncTxCharacteristic.StartNotificationsAsync();
-            _syncTxCharacteristic.CharacteristicValueChanged += (sender, eventArgs) =>
-            {
-                _logger.LogDebug($"Sync Tx characteristic value changed: {BitConverter.ToString(eventArgs.Value)}");
-                ProcessCharacteristic("Sync Tx", eventArgs.Value);
-            };
+            _syncTxCharacteristic.CharacteristicValueChanged += OnSyncTxCharacteristicChanged;
         }
 
         _logger.LogInfo("Characteristic registration completed");
-    }
+    }   
     public void Dispose()
     {
         lock (_lock)
@@ -144,12 +152,12 @@ public partial class ZwiftPlayBleManager : IDisposable
         _zapDevice.ProcessCharacteristic(source, value);
     }
 
-    private void OnAsyncCharacteristicChanged(object sender, GattCharacteristicValueChangedEventArgs e)
+    private void OnAsyncCharacteristicChanged(object? sender, GattCharacteristicValueChangedEventArgs e)
     {
         ProcessCharacteristic("Async", e.Value);
     }
 
-    private void OnSyncTxCharacteristicChanged(object sender, GattCharacteristicValueChangedEventArgs e)
+    private void OnSyncTxCharacteristicChanged(object? sender, GattCharacteristicValueChangedEventArgs e)
     {
         ProcessCharacteristic("Sync Tx", e.Value);
     }

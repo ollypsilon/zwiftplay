@@ -154,7 +154,8 @@ public class KeyboardKeys
                 "PAGEDOWN" => PAGEDOWN,
                 "TAB" => TAB,
                 "SHIFT+TAB" => TAB,
-                _ when strValue.Length == 1 => (byte)char.ToUpper(strValue[0])
+                _ when strValue.Length == 1 => (byte)char.ToUpper(strValue[0]),
+                _ => throw new ArgumentException($"Unsupported key value: {strValue}")
             };
         }
         
