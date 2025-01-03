@@ -13,46 +13,48 @@ public class ZwiftPlayDevice : AbstractZapDevice
     //private readonly IZwiftLogger _logger;
     private int _batteryLevel;
     private ControllerNotification? _lastButtonState;
-
     private readonly Config _config;
-
+    private byte[] _counterBuffer = new byte[4];
+    private byte[] _payloadBuffer = new byte[1024]; // Adjust size as needed
     public ZwiftPlayDevice(IZwiftLogger logger, Config config) : base(logger)
     {
         _config = config;
         _logger.LogInfo($"ZwiftPlayDevice initialized with SendKeys: {config.SendKeys}, UseMapping: {config.UseMapping}");
         Console.WriteLine($"ZwiftPlayDevice initialized with SendKeys: {config.SendKeys}, UseMapping: {config.UseMapping}");
     }
-
     protected override void ProcessEncryptedData(byte[] bytes)
     {
         _logger.LogDebug($"Processing encrypted data length: {bytes.Length}");
         try
         {
+            // Reuse buffers instead of creating new arrays
+            Buffer.BlockCopy(bytes, 0, _counterBuffer, 0, _counterBuffer.Length);
+            var counter = new ByteBuffer(_counterBuffer).ReadInt32();
+            
+            var payloadLength = bytes.Length - 4 - EncryptionUtils.MAC_LENGTH;
+            Buffer.BlockCopy(bytes, 4, _payloadBuffer, 0, payloadLength);
+            
             if (Debug)
                 _logger.LogDebug($"Processing encrypted data: {Utils.Utils.ByteArrayToStringHex(bytes)}");
-            var counterBytes = new byte[4];
-            Array.Copy(bytes, 0, counterBytes, 0, counterBytes.Length);
-            var counter = new ByteBuffer(counterBytes).ReadInt32();
             if (Debug)
-                _logger.LogDebug($"Counter bytes: {Utils.Utils.ByteArrayToStringHex(counterBytes)}");
-            var payloadBytes = new byte[bytes.Length - 4 - EncryptionUtils.MAC_LENGTH];
-            Array.Copy(bytes, 4, payloadBytes, 0, payloadBytes.Length);
+                _logger.LogDebug($"Counter bytes: {Utils.Utils.ByteArrayToStringHex(_counterBuffer)}");
             if (Debug)
-                _logger.LogDebug($"Attempting payload extraction, length: {payloadBytes.Length}");
+                _logger.LogDebug($"Attempting payload extraction, length: {payloadLength}");
 
             var tagBytes = new byte[EncryptionUtils.MAC_LENGTH];
-            Array.Copy(bytes, EncryptionUtils.MAC_LENGTH + payloadBytes.Length, tagBytes, 0, tagBytes.Length);
+            Array.Copy(bytes, EncryptionUtils.MAC_LENGTH + payloadLength, tagBytes, 0, tagBytes.Length);
             if (Debug)
-                _logger.LogDebug($"Attempting tag extraction, starting at index: {EncryptionUtils.MAC_LENGTH + payloadBytes.Length}");
+                _logger.LogDebug($"Attempting tag extraction, starting at index: {EncryptionUtils.MAC_LENGTH + payloadLength}");
 
-            var data = new byte[payloadBytes.Length];
+            byte[] data;
             try
             {
-                data = _zapEncryption.Decrypt(counter, payloadBytes, tagBytes);
+                data = _zapEncryption.Decrypt(counter, _payloadBuffer.AsSpan(0, payloadLength).ToArray(), tagBytes);
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Decrypt failed - Counter: {counter}, Payload: {BitConverter.ToString(payloadBytes)}, Tag: {BitConverter.ToString(tagBytes)}", ex);
+                _logger.LogError($"Decrypt failed - Counter: {counter}, Payload: {BitConverter.ToString(_payloadBuffer, 0, payloadLength)}, Tag: {BitConverter.ToString(tagBytes)}", ex);
+                return;
             }
             if (Debug)
             _logger.LogDebug($"Decrypted data: {BitConverter.ToString(data)}");
@@ -91,8 +93,6 @@ public class ZwiftPlayDevice : AbstractZapDevice
             _logger.LogError("Decrypt failed", ex);
         }
     }
-    private bool SendKeys { get; set; } = false;
-
     private void ProcessButtonNotification(ControllerNotification notification)
     {
 
