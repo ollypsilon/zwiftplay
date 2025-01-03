@@ -2,6 +2,7 @@
 using ZwiftPlayConsoleApp.BLE;
 using ZwiftPlayConsoleApp.Configuration;
 using System.Text.Json;
+using ZwiftPlayConsoleApp.Logging;
 
 namespace ZwiftPlayConsoleApp.Utils;
 
@@ -53,67 +54,70 @@ public class KeyboardKeys
     public const int Z = 0x5A;
     public const int SUBTRACT = 0x6D;  // Numpad minus
     public const int ADD = 0x6B;       // Numpad plus
-
     private static Config? _config;
-
-    public static void Initialize(Config config)
+    private static ConfigurableLogger? _logger;
+    public static void Initialize(Config config, IZwiftLogger logger)
     {
         _config = config;
+        _logger = new ConfigurableLogger(
+            ((ConfigurableLogger)logger)._config, 
+            nameof(KeyboardKeys)
+        );
     }
-      public static void ProcessZwiftPlay(ButtonChange change)
-      {
-          if (_config == null || !_config.SendKeys)
-          {
-            return;
-          }
+    public static void ProcessZwiftPlay(ButtonChange change)
+    {
+        if (_config == null || !_config.SendKeys)
+        {
+        return;
+        }
 
-          (byte? keyCode, bool withShift) = _config.UseMapping 
-              ? GetMappedKey(_config.KeyboardMapping.ButtonToKeyMap, change.Button)
-              : (GetKeyCode(change.Button), false);
+        (byte? keyCode, bool withShift) = _config.UseMapping 
+            ? GetMappedKey(_config.KeyboardMapping.ButtonToKeyMap, change.Button)
+            : (GetKeyCode(change.Button), false);
 
-          if (keyCode == null)
-          {
-            return;
-          }
+        if (keyCode == null)
+        {
+        return;
+        }
 
-          if (change.IsPressed)
-          {
-            PressKey((byte)keyCode, withShift);
-          }
-          else
-          {
-            ReleaseKey((byte)keyCode, withShift);
-          }
-      }
+        if (change.IsPressed)
+        {
+        PressKey((byte)keyCode, withShift);
+        }
+        else
+        {
+        ReleaseKey((byte)keyCode, withShift);
+        }
+    }
 
-      private static (byte? keyCode, bool withShift) GetMappedKey(Dictionary<ZwiftPlayButton, KeyMapping> mapping, ZwiftPlayButton button)
-      {
-          if (mapping.TryGetValue(button, out var keyMapping))
-          {
-            var withShift = keyMapping.OriginalMapping.StartsWith("SHIFT+", StringComparison.OrdinalIgnoreCase);
-            //Console.WriteLine($"Mapped {button} to {keyMapping.OriginalMapping} with shift: {withShift}");
-            return (keyMapping.KeyCode, withShift);
-          }
-          return (null, false);
-      }
+    private static (byte? keyCode, bool withShift) GetMappedKey(Dictionary<ZwiftPlayButton, KeyMapping> mapping, ZwiftPlayButton button)
+    {
+        if (mapping.TryGetValue(button, out var keyMapping))
+        {
+        var withShift = keyMapping.OriginalMapping.StartsWith("SHIFT+", StringComparison.OrdinalIgnoreCase);
+        _logger?.LogInfo($"Mapped {button} to {keyMapping.OriginalMapping} with shift: {withShift}");
+        //Console.WriteLine($"Mapped {button} to {keyMapping.OriginalMapping} with shift: {withShift}");
+        return (keyMapping.KeyCode, withShift);
+        }
+        return (null, false);
+    }
 
-      private static byte? GetKeyCode(ZwiftPlayButton button)
-      {
-          switch (button)
-          {
-              case ZwiftPlayButton.Up:
-                  return UP;
-              case ZwiftPlayButton.Down:
-                  return DOWN;
-              case ZwiftPlayButton.Left:
-                  return LEFT;
+    private static byte? GetKeyCode(ZwiftPlayButton button)
+    {
+        switch (button)
+        {
+            case ZwiftPlayButton.Up:
+                return UP;
+            case ZwiftPlayButton.Down:
+                return DOWN;
+            case ZwiftPlayButton.Left:
+                return LEFT;
             case ZwiftPlayButton.Right:
                 return RIGHT;
             case ZwiftPlayButton.LeftShoulder:
                 return LCONTROL;
             case ZwiftPlayButton.LeftPower:
                 break;
-            
             case ZwiftPlayButton.A:
                 return A;
             case ZwiftPlayButton.B:
@@ -126,7 +130,6 @@ public class KeyboardKeys
                 return RCONTROL;
             case ZwiftPlayButton.RightPower:
                 break;
-            
             default:
                 throw new ArgumentOutOfRangeException(nameof(button), button, null);
         }

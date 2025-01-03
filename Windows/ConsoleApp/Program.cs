@@ -3,7 +3,6 @@ using ZwiftPlayConsoleApp.BLE;
 using ZwiftPlayConsoleApp.Configuration;
 using ZwiftPlayConsoleApp.Zap;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using ZwiftPlayConsoleApp.Logging;
 using ZwiftPlayConsoleApp.Utils;
 using Microsoft.Extensions.Configuration;
@@ -101,38 +100,38 @@ public class Program
     {
         ValidateConfiguration(config);
 
+        // 1. Configuration setup
         IConfiguration configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("Configuration/AppSettings.json", optional: false)
             .Build();
 
-        services.Configure<AppSettings>(configuration.GetSection("AppSettings"));
-        
+        // 2. Logging setup
         var loggingConfig = new LoggingConfig 
         {
             EnableBleManagerLogging = false,
             EnableZwiftDeviceLogging = false,
             EnableControllerNotificationLogging = false,
+            EnableKeyboardKeysLogging = false,
             EnableAppLogging = false
         };
 
-        KeyboardKeys.Initialize(config);
+        // 3. Register configurations
         services.AddSingleton(config);
-
-        services.AddLogging(builder =>
-        {
-            builder.SetMinimumLevel(LogLevel.Debug);
-            builder.AddConsole(options =>
-            {
-                options.LogToStandardErrorThreshold = LogLevel.Debug;
-            });
-        });
-
         services.AddSingleton(loggingConfig);
-        services.AddSingleton<IZwiftLogger>(provider => new ConfigurableLogger(loggingConfig));
+        services.Configure<AppSettings>(configuration.GetSection("AppSettings"));
+
+        // 4. Register loggers
+        var logger = new ConfigurableLogger(loggingConfig, nameof(App));
+        services.AddSingleton<IZwiftLogger>(logger);
+
+        // 5. Initialize components
+        KeyboardKeys.Initialize(config, logger);
+
+        // 6. Register application services
         services.AddSingleton<App>();
         services.AddSingleton<ZwiftPlayDevice>();
-    }
+    }    
     private static void ValidateConfiguration(Config config)
     {
         if (config.UseMapping && string.IsNullOrEmpty(config.MappingFilePath))

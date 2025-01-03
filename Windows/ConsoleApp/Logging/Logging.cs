@@ -1,5 +1,6 @@
 ﻿using ZwiftPlayConsoleApp.BLE;
 using ZwiftPlayConsoleApp.Zap.Proto;
+using ZwiftPlayConsoleApp.Utils;
 
 namespace ZwiftPlayConsoleApp.Logging
 
@@ -18,6 +19,7 @@ namespace ZwiftPlayConsoleApp.Logging
         public bool EnableBleManagerLogging { get; set; }
         public bool EnableZwiftDeviceLogging { get; set; }
         public bool EnableControllerNotificationLogging { get; set; }
+        public bool EnableKeyboardKeysLogging { get; set; }
         public bool EnableAppLogging { get; set; }
     }
 
@@ -69,6 +71,7 @@ namespace ZwiftPlayConsoleApp.Logging
                 nameof(ZwiftPlayBleManager) => _config.EnableBleManagerLogging,
                 nameof(ZwiftPlayDevice) => _config.EnableZwiftDeviceLogging,
                 nameof(ControllerNotification) => _config.EnableControllerNotificationLogging,
+                nameof(KeyboardKeys) => _config.EnableKeyboardKeysLogging,
                 nameof(App) => _config.EnableAppLogging,
                 _ => false
             };
