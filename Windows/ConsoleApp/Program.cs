@@ -210,11 +210,18 @@ public partial class App : IDisposable
       }
     private async void HandleAdvertisementReceived(object? sender, BluetoothAdvertisingEvent scanResult)
     {
-        if (scanResult?.ManufacturerData != null && 
-            scanResult.ManufacturerData.ContainsKey(ZapConstants.ZWIFT_MANUFACTURER_ID) && 
-            scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID] != null)
+        try 
         {
-            await HandleDeviceDiscovered(scanResult);
+            if (scanResult?.ManufacturerData != null && 
+                scanResult.ManufacturerData.ContainsKey(ZapConstants.ZWIFT_MANUFACTURER_ID) && 
+                scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID] != null)
+            {
+                await HandleDeviceDiscovered(scanResult);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
         }
     }
     private async Task HandleDeviceDiscovered(BluetoothAdvertisingEvent scanResult)
@@ -223,6 +230,7 @@ public partial class App : IDisposable
         {
             return;
         }
+    
         ThrowIfDisposed();
         if (scanResult?.Device == null || 
             scanResult.ManufacturerData == null || 
@@ -237,7 +245,14 @@ public partial class App : IDisposable
         var isLeft = manufacturerData[0] == ZapConstants.RC1_LEFT_SIDE;
         var deviceKey = $"{(isLeft ? "Left" : "Right")}_{scanResult.Device.Id}";
 
-        // Add lock to prevent race conditions
+        // Force disconnect if device is already connected
+        if (scanResult.Device.Gatt?.IsConnected == true)
+        {
+            _logger.LogInfo($"Disconnecting existing {(isLeft ? "Left" : "Right")} controller connection");
+            scanResult.Device.Gatt.Disconnect();
+            await Task.Delay(1000, _scanCts.Token); // Allow time for cleanup
+        }
+
         lock (_lock)
         {
             if (_connectedDevices.Contains(deviceKey) || _bleManagers.ContainsKey(deviceKey))
@@ -254,8 +269,7 @@ public partial class App : IDisposable
 
         using var cts = new CancellationTokenSource(_settings.DefaultConnectionTimeoutMs);
         await _bleManagers[deviceKey].ConnectAsync();
-    }
-    private async Task RunScanningLoop()
+    }    private async Task RunScanningLoop()
     {
         ThrowIfDisposed();
         using var scanTimeoutCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(_settings.DefaultScanTimeoutMs));

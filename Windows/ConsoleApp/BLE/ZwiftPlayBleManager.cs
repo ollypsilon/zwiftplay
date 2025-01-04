@@ -198,12 +198,12 @@ public partial class ZwiftPlayBleManager : IDisposable
         _logger.LogDebug("Starting characteristic registration");
     
         // Ensure connection is stable
-        await Task.Delay(3000).ConfigureAwait(false);
+        await Task.Delay(1000).ConfigureAwait(false);
     
         if (!gatt.IsConnected)
         {
             await gatt.ConnectAsync().ConfigureAwait(false);
-            await Task.Delay(1000).ConfigureAwait(false);
+            await Task.Delay(500).ConfigureAwait(false);
         }
     
         // Get all services and verify ZAP service
