@@ -7,6 +7,7 @@ using ZwiftPlayConsoleApp.Logging;
 using ZwiftPlayConsoleApp.Utils;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 
 namespace ZwiftPlayConsoleApp;
 
@@ -147,9 +148,10 @@ public partial class App : IDisposable
     private readonly IZwiftLogger _logger;
     private readonly Config _config;
     private readonly AppSettings _settings;
-    private readonly Dictionary<string, ZwiftPlayBleManager> _bleManagers = new();
+    private readonly ConcurrentDictionary<string, ZwiftPlayBleManager> _bleManagers = new();
     private readonly HashSet<string> _connectedDevices = new();
     private readonly CancellationTokenSource _scanCts = new();
+    private readonly object _lock = new();
 
     public App(IZwiftLogger logger, Config config, IOptions<AppSettings> settings)
     {
@@ -157,41 +159,51 @@ public partial class App : IDisposable
         _config = config;
         _settings = settings.Value;
     }
+      public async Task RunAsync()
+      {
+          if (_disposed)
+          {
+              throw new ObjectDisposedException(nameof(App));
+          }
+            Console.CancelKeyPress += (sender, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                Console.WriteLine("Shutting down gracefully...");
+                _scanCts.Cancel();
+                Task.Run(async () =>
+                {
+                    await Task.WhenAll(
+                        Task.Delay(1000), // Give time for cleanup
+                        Task.Run(() => CleanupResources())
+                    );
+                    Environment.Exit(0);
+                });
+            };
 
-    public async Task RunAsync()
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException(nameof(App));
-        }
-
-        Console.CancelKeyPress += (sender, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            Console.WriteLine("Shutting down gracefully...");
-            _scanCts.Cancel();
-            CleanupResources();
-            Environment.Exit(0);
-        };
-
-        var available = await Bluetooth.GetAvailabilityAsync();
+          var available = await Bluetooth.GetAvailabilityAsync();
         
-        if (!available)
-        {
-            _logger.LogError("Bluetooth not available");
-            throw new ArgumentException("Bluetooth required");
-        }
+          if (!available)
+          {
+              _logger.LogError("Bluetooth not available");
+              throw new ArgumentException("Bluetooth required");
+          }
 
-        SetupBluetoothHandler();
+          SetupBluetoothHandler();
 
-        await Task.WhenAll(
-            RunScanningLoop(),
-            HandleUserInput()
-        );
-        
-        CleanupResources();
-    }
-      private void SetupBluetoothHandler()
+          try 
+          {
+              await Task.WhenAll(
+                  RunScanningLoop(),
+                  HandleUserInput(_scanCts.Token)
+              );
+          }
+          finally 
+          {
+              Bluetooth.AdvertisementReceived -= HandleAdvertisementReceived;
+              CleanupResources();
+          }
+    }      
+    private void SetupBluetoothHandler()
       {
           ThrowIfDisposed();
           Bluetooth.AdvertisementReceived += HandleAdvertisementReceived;
@@ -205,118 +217,135 @@ public partial class App : IDisposable
             await HandleDeviceDiscovered(scanResult);
         }
     }
-      private async Task HandleDeviceDiscovered(BluetoothAdvertisingEvent scanResult)
-      {
-          ThrowIfDisposed();
-          if (scanResult?.Device == null || 
-              scanResult.ManufacturerData == null || 
-              !scanResult.ManufacturerData.ContainsKey(ZapConstants.ZWIFT_MANUFACTURER_ID) ||
-              scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID] == null ||
-              scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID].Length == 0)
-          {
-              return;
-          }
+    private async Task HandleDeviceDiscovered(BluetoothAdvertisingEvent scanResult)
+    {
+        if (_scanCts.Token.IsCancellationRequested)
+        {
+            return;
+        }
+        ThrowIfDisposed();
+        if (scanResult?.Device == null || 
+            scanResult.ManufacturerData == null || 
+            !scanResult.ManufacturerData.ContainsKey(ZapConstants.ZWIFT_MANUFACTURER_ID) ||
+            scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID] == null ||
+            scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID].Length == 0)
+        {
+            return;
+        }
 
-          var manufacturerData = scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID];
-          var isLeft = manufacturerData[0] == ZapConstants.RC1_LEFT_SIDE;
-          var deviceKey = $"{(isLeft ? "Left" : "Right")}_{scanResult.Device.Id}";
+        var manufacturerData = scanResult.ManufacturerData[ZapConstants.ZWIFT_MANUFACTURER_ID];
+        var isLeft = manufacturerData[0] == ZapConstants.RC1_LEFT_SIDE;
+        var deviceKey = $"{(isLeft ? "Left" : "Right")}_{scanResult.Device.Id}";
 
-          if (!_connectedDevices.Contains(deviceKey))
-          {
-              _logger.LogInfo($"Found {(isLeft ? "Left" : "Right")} controller");
-              Console.WriteLine($"Found {(isLeft ? "Left" : "Right")} controller");
-              var manager = new ZwiftPlayBleManager(scanResult.Device, isLeft, _logger, _config);
-              _bleManagers[deviceKey] = manager;
-              _connectedDevices.Add(deviceKey);
+        // Add lock to prevent race conditions
+        lock (_lock)
+        {
+            if (_connectedDevices.Contains(deviceKey) || _bleManagers.ContainsKey(deviceKey))
+            {
+                return;
+            }
 
-              using var cts = new CancellationTokenSource(_settings.DefaultConnectionTimeoutMs);
-              await manager.ConnectAsync();
-          }
-      }    
+            _logger.LogInfo($"Found {(isLeft ? "Left" : "Right")} controller");
+            Console.WriteLine($"Found {(isLeft ? "Left" : "Right")} controller");
+            var manager = new ZwiftPlayBleManager(scanResult.Device, isLeft, _logger, _config);
+            _bleManagers[deviceKey] = manager;
+            _connectedDevices.Add(deviceKey);
+        }
 
-      private async Task RunScanningLoop()
-      {
-          ThrowIfDisposed();
-          using var scanTimeoutCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(_settings.DefaultScanTimeoutMs));
-          int lastDeviceCount = 0;
+        using var cts = new CancellationTokenSource(_settings.DefaultConnectionTimeoutMs);
+        await _bleManagers[deviceKey].ConnectAsync();
+    }
+    private async Task RunScanningLoop()
+    {
+        ThrowIfDisposed();
+        using var scanTimeoutCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(_settings.DefaultScanTimeoutMs));
+        int lastDeviceCount = 0;
+
+        _logger.LogInfo($"Starting scan for {_settings.DefaultRequiredDeviceCount} devices with {_settings.DefaultScanTimeoutMs/1000.0:F0} s timeout");
+        Console.WriteLine($"Starting scan for {_settings.DefaultRequiredDeviceCount} devices with {_settings.DefaultScanTimeoutMs/1000.0:F0} s timeout");
+
+        while (!scanTimeoutCts.Token.IsCancellationRequested)
+        {
+            if (_bleManagers.Count != lastDeviceCount)
+            {
+                _logger.LogInfo($"Scanning - Connected {_bleManagers.Count}/{_settings.DefaultRequiredDeviceCount}");
+                Console.WriteLine($"Scanning - Connected {_bleManagers.Count}/{_settings.DefaultRequiredDeviceCount}");
+                lastDeviceCount = _bleManagers.Count;
+            }
     
-          _logger.LogInfo($"Starting scan for {_settings.DefaultRequiredDeviceCount} devices with {_settings.DefaultScanTimeoutMs/1000.0:F0} s timeout");
-          Console.WriteLine($"Starting scan for {_settings.DefaultRequiredDeviceCount} devices with {_settings.DefaultScanTimeoutMs/1000.0:F0} s timeout");
+            if (_bleManagers.Count >= _settings.DefaultRequiredDeviceCount)
+            {
+                _logger.LogInfo("Required device count reached");
+                Console.WriteLine("Required device count reached");
+                break;
+            }
 
-          while (!scanTimeoutCts.Token.IsCancellationRequested)
-          {
-              if (_bleManagers.Count != lastDeviceCount)
-              {
-                  _logger.LogInfo($"Scanning - Connected {_bleManagers.Count}/{_settings.DefaultRequiredDeviceCount}");
-                  Console.WriteLine($"Scanning - Connected {_bleManagers.Count}/{_settings.DefaultRequiredDeviceCount}");
-                  lastDeviceCount = _bleManagers.Count;
-              }
+            await Bluetooth.RequestLEScanAsync(new BluetoothLEScanOptions());
+
+            try
+            {
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_scanCts.Token, scanTimeoutCts.Token);
+                await Task.Delay(_settings.DefaultTaskDelay, linkedCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                var reason = scanTimeoutCts.IsCancellationRequested ? "timeout" : "user cancellation";
+                _logger.LogInfo($"Scanning stopped: {reason}");
+                Console.WriteLine($"Scanning stopped: {reason}");
         
-              if (_bleManagers.Count >= _settings.DefaultRequiredDeviceCount)
-              {
-                  _logger.LogInfo("Required device count reached");
-                  Console.WriteLine("Required device count reached");
-                  break;
-              }
+                if (reason == "timeout")
+                {
+                    _logger.LogInfo("Exiting due to scan timeout");
+                    Console.WriteLine("Exiting due to scan timeout");
+                    Environment.Exit(1);
+                }
+                break;
+            }
+        }
+    }
 
-              await Bluetooth.RequestLEScanAsync(new BluetoothLEScanOptions());
-
-              try
-              {
-                  using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_scanCts.Token, scanTimeoutCts.Token);
-                  await Task.Delay(_settings.DefaultTaskDelay, linkedCts.Token);
-              }
-              catch (OperationCanceledException)
-              {
-                  var reason = scanTimeoutCts.IsCancellationRequested ? "timeout" : "user cancellation";
-                  _logger.LogInfo($"Scanning stopped: {reason}");
-                  Console.WriteLine($"Scanning stopped: {reason}");
-            
-                  if (reason == "timeout")
-                  {
-                      _logger.LogInfo("Exiting due to scan timeout");
-                      Console.WriteLine("Exiting due to scan timeout");
-                      Environment.Exit(1);
-                  }
-                  break;
-              }
-          }
-      }
-
-      private async Task HandleUserInput()
-      {
-          ThrowIfDisposed();
-          while (true) // Keep the task running
-          {
-              try
-              {
-                  if (Console.KeyAvailable && !_config.SendKeys)
-                  {
-                  var key = Console.ReadKey(true);
-                  if (key.KeyChar.ToString() == _settings.QuitKey)
-                  {
-                      _logger.LogInfo("Shutting down...");
-                      Console.WriteLine("Shutting down...");
-                      _scanCts.Cancel();
-                      Environment.Exit(0);
-                  }
-                  }
-                  await Task.Delay(1);
-              }
-              catch (InvalidOperationException)
-              {
-              await Task.Delay(1000);
-              }
-          }
-      }
-
+    private async Task HandleUserInput(CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        while (!ct.IsCancellationRequested) 
+        {
+            try
+            {
+                if (Console.KeyAvailable && !_config.SendKeys)
+                {
+                    var key = Console.ReadKey(true);
+                    if (key.KeyChar.ToString() == _settings.QuitKey)
+                    {
+                        _logger.LogInfo("Shutting down...");
+                        Console.WriteLine("Shutting down...");
+                        _scanCts.Cancel();
+                        return;
+                    }
+                }
+                await Task.Delay(100, ct); // Reduced polling frequency
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }    
     private void CleanupResources()
     {
+        if (_disposed) return;
+
+        Bluetooth.AdvertisementReceived -= HandleAdvertisementReceived;
+        _scanCts.Cancel();
+
+        // Force immediate cleanup of BLE managers
         foreach (var manager in _bleManagers.Values)
         {
             manager.Dispose();
         }
-        _scanCts.Dispose();
+        _bleManagers.Clear();
+        _connectedDevices.Clear();
+
+        _disposed = true;
     }
 
     protected virtual void Dispose(bool disposing)
