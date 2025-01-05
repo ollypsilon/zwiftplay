@@ -4,7 +4,6 @@ using ZwiftPlayConsoleApp.Zap;
 using ZwiftPlayConsoleApp.Configuration;
 using System.Collections.Concurrent;
 using ZwiftPlayConsoleApp.Utils;
-using System.Buffers;
 
 namespace ZwiftPlayConsoleApp.BLE;
 public partial class ZwiftPlayBleManager : IDisposable
@@ -16,9 +15,9 @@ public partial class ZwiftPlayBleManager : IDisposable
     private bool _isDisposed;
     private readonly object _lock = new();
     private readonly Config _config;
-    private static GattCharacteristic? _asyncCharacteristic;
-    private static GattCharacteristic? _syncRxCharacteristic;
-    private static GattCharacteristic? _syncTxCharacteristic;
+    private GattCharacteristic? _asyncCharacteristic;
+    private GattCharacteristic? _syncRxCharacteristic;
+    private GattCharacteristic? _syncTxCharacteristic;
     private const int CONNECTION_INTERVAL = 11; // 1.25ms units
     private readonly ConcurrentQueue<(string source, byte[] value)> _characteristicQueue = new();
     private readonly PeriodicTimer _processingTimer;
@@ -35,59 +34,57 @@ public partial class ZwiftPlayBleManager : IDisposable
         Task.Run(() => StartProcessingTimer(CancellationToken.None));
     }
     private readonly SemaphoreSlim _processingSemaphore = new(1, 1);
-      private async Task StartProcessingTimer(CancellationToken ct)
-      {
-          //_logger.LogDebug("Starting processing timer");
-          while (await _processingTimer.WaitForNextTickAsync(ct))
-          {
-              //_logger.LogDebug($"Timer tick, queue empty: {_characteristicQueue.IsEmpty}");
-              if (_characteristicQueue.IsEmpty)
-              {
-                  await Task.Delay(100, ct); // Reduced polling when idle
-              }
-              else
-              {
-                  await ProcessCharacteristicBatch(ct);
-              }
-          }
-      }
-      private async Task ProcessCharacteristicBatch(CancellationToken ct)
-      {
-          try 
-          {
-              await _processingSemaphore.WaitAsync(ct);
-              try
-              {
-                  //_logger.LogDebug($"Processing timer tick, queue size: {_characteristicQueue.Count}");
+    private async Task StartProcessingTimer(CancellationToken ct)
+    {
+        //_logger.LogDebug("Starting processing timer");
+        while (await _processingTimer.WaitForNextTickAsync(ct))
+        {
+            //_logger.LogDebug($"Timer tick, queue empty: {_characteristicQueue.IsEmpty}");
+            if (_characteristicQueue.IsEmpty)
+            {
+                await Task.Delay(100, ct); // Reduced polling when idle
+            }
+            else
+            {
+                await ProcessCharacteristicBatch(ct);
+            }
+        }
+    }
+    private async Task ProcessCharacteristicBatch(CancellationToken ct)
+    {
+        try 
+        {
+            await _processingSemaphore.WaitAsync(ct);
+            try
+            {
+                //_logger.LogDebug($"Processing timer tick, queue size: {_characteristicQueue.Count}");
 
-                  var batch = new List<(string source, byte[] value)>();
-                  while (batch.Count < 100 && _characteristicQueue.TryDequeue(out var item))
-                  {
-                      //_logger.LogDebug($"Dequeued item from {item.source}");
-                      batch.Add(item);
-                  }
+                var batch = new List<(string source, byte[] value)>();
+                while (batch.Count < 100 && _characteristicQueue.TryDequeue(out var item))
+                {
+                    //_logger.LogDebug($"Dequeued item from {item.source}");
+                    batch.Add(item);
+                }
 
-                  if (batch.Count > 0)
-                  {
-                      //_logger.LogDebug($"Processing batch of {batch.Count} items");
-                      foreach (var (source, value) in batch)
-                      {
-                          ProcessCharacteristic(source, value);
-                      }
-                  }
-              }
-              finally
-              {
-                  _processingSemaphore.Release();
-              }
-          }
-          catch (OperationCanceledException)
-          {
-              // Normal cancellation
-          }
-      }
-
-
+                if (batch.Count > 0)
+                {
+                    //_logger.LogDebug($"Processing batch of {batch.Count} items");
+                    foreach (var (source, value) in batch)
+                    {
+                        ProcessCharacteristic(source, value);
+                    }
+                }
+            }
+            finally
+            {
+                _processingSemaphore.Release();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal cancellation
+        }
+    }
     private static async Task SetConnectionParameters(RemoteGattServer gatt)
     {
         var service = await gatt.GetPrimaryServiceAsync(GenericBleUuids.GENERIC_ACCESS_SERVICE_UUID);
@@ -113,16 +110,10 @@ public partial class ZwiftPlayBleManager : IDisposable
     }
 
     // Add a connection state manager
-    private sealed class ConnectionStateManager
+    private sealed class ConnectionStateManager(IZwiftLogger logger)
     {
-        private volatile int _state;
-        private readonly IZwiftLogger _logger;
-
-        public ConnectionStateManager(IZwiftLogger logger)
-        {
-            _logger = logger;
-            _state = (int)ConnectionState.Disconnected;
-        }
+        private volatile int _state = (int)ConnectionState.Disconnected;
+        private readonly IZwiftLogger _logger = logger;
 
         public bool TrySetState(ConnectionState expectedState, ConnectionState newState)
         {
@@ -301,7 +292,6 @@ public partial class ZwiftPlayBleManager : IDisposable
         e.Value.CopyTo(bytes, 0);
         EnqueueCharacteristic("Async", bytes);
     }
-
     private void OnSyncTxCharacteristicChanged(object? sender, GattCharacteristicValueChangedEventArgs e)
     {
         var bytes = new byte[e.Value.Length];
@@ -333,7 +323,6 @@ public partial class ZwiftPlayBleManager : IDisposable
         }
         return false;
     }
-
     private const int MaxRetryAttempts = 3;
     private const int RetryDelayMs = 1000;
     private async ValueTask<bool> TryConnectWithRetry()

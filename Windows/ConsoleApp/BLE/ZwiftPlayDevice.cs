@@ -7,20 +7,38 @@ using ZwiftPlayConsoleApp.Configuration;
 
 namespace ZwiftPlayConsoleApp.BLE;
 
-public class ZwiftPlayDevice : AbstractZapDevice
+public partial class ZwiftPlayDevice : AbstractZapDevice, IDisposable
 {
-    
-    //private readonly IZwiftLogger _logger;
     private int _batteryLevel;
     private ControllerNotification? _lastButtonState;
     private readonly Config _config;
     private byte[] _counterBuffer = new byte[4];
     private byte[] _payloadBuffer = new byte[1024]; // Adjust size as needed
+    private bool _disposed;
+
     public ZwiftPlayDevice(IZwiftLogger logger, Config config) : base(logger)
     {
         _config = config;
         _logger.LogInfo($"ZwiftPlayDevice initialized with SendKeys: {config.SendKeys}, UseMapping: {config.UseMapping}");
         Console.WriteLine($"ZwiftPlayDevice initialized with SendKeys: {config.SendKeys}, UseMapping: {config.UseMapping}");
+    }
+    protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed) return;
+            
+            if (disposing)
+            {
+                _lastButtonState = null;
+                _counterBuffer = [];
+                _payloadBuffer = [];
+            }
+            
+            _disposed = true;
+    }
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
     }
     protected override void ProcessEncryptedData(byte[] bytes)
     {
