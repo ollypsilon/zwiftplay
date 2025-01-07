@@ -57,18 +57,14 @@ public partial class ZwiftPlayBleManager : IDisposable
             await _processingSemaphore.WaitAsync(ct);
             try
             {
-                //_logger.LogDebug($"Processing timer tick, queue size: {_characteristicQueue.Count}");
-
                 var batch = new List<(string source, byte[] value)>();
                 while (batch.Count < 100 && _characteristicQueue.TryDequeue(out var item))
                 {
-                    //_logger.LogDebug($"Dequeued item from {item.source}");
                     batch.Add(item);
                 }
 
                 if (batch.Count > 0)
                 {
-                    //_logger.LogDebug($"Processing batch of {batch.Count} items");
                     foreach (var (source, value) in batch)
                     {
                         ProcessCharacteristic(source, value);
@@ -79,6 +75,11 @@ public partial class ZwiftPlayBleManager : IDisposable
             {
                 _processingSemaphore.Release();
             }
+        }
+        catch (InvalidOperationException)
+        {
+            // Handle concurrent access or disposed objects
+            await Task.Delay(100, ct);
         }
         catch (OperationCanceledException)
         {
@@ -301,6 +302,7 @@ public partial class ZwiftPlayBleManager : IDisposable
     private const int MAX_QUEUE_SIZE = 1000;
     private void EnqueueCharacteristic(string source, byte[] value)
     {
+        //_logger.LogDebug($"Queue size: {_characteristicQueue.Count}, Memory: {GC.GetTotalMemory(false)}");
         if (_characteristicQueue.Count < MAX_QUEUE_SIZE)
         {
             // Only enqueue if the last message was different

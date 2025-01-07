@@ -161,47 +161,48 @@ public partial class App : IDisposable
     }
       public async Task RunAsync()
       {
-          if (_disposed)
-          {
-              throw new ObjectDisposedException(nameof(App));
-          }
-            Console.CancelKeyPress += (sender, eventArgs) =>
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(App));
+        }
+        Console.CancelKeyPress += (sender, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            Console.WriteLine("Shutting down gracefully...");
+            _scanCts.Cancel();
+            Task.Run(async () =>
             {
-                eventArgs.Cancel = true;
-                Console.WriteLine("Shutting down gracefully...");
-                _scanCts.Cancel();
-                Task.Run(async () =>
-                {
-                    await Task.WhenAll(
-                        Task.Delay(1000), // Give time for cleanup
-                        Task.Run(() => CleanupResources())
-                    );
-                    Environment.Exit(0);
-                });
-            };
+                await Task.WhenAll(
+                    Task.Delay(1000), // Give time for cleanup
+                    Task.Run(() => CleanupResources())
+                );
+                Environment.Exit(0);
+            });
+        };
 
-          var available = await Bluetooth.GetAvailabilityAsync();
-        
-          if (!available)
-          {
-              _logger.LogError("Bluetooth not available");
-              throw new ArgumentException("Bluetooth required");
-          }
+        var available = await Bluetooth.GetAvailabilityAsync();
+    
+        if (!available)
+        {
+            _logger.LogError("Bluetooth not available");
+            throw new ArgumentException("Bluetooth required");
+        }
 
-          SetupBluetoothHandler();
+        SetupBluetoothHandler();
 
-          try 
-          {
-              await Task.WhenAll(
-                  RunScanningLoop(),
-                  HandleUserInput(_scanCts.Token)
-              );
-          }
-          finally 
-          {
-              Bluetooth.AdvertisementReceived -= HandleAdvertisementReceived;
-              CleanupResources();
-          }
+        try 
+        {
+            await Task.WhenAll(
+            RunScanningLoop(),
+            HandleUserInput(_scanCts.Token)
+            );
+        }
+        finally 
+        {
+        Bluetooth.AdvertisementReceived -= HandleAdvertisementReceived;
+        await Task.WhenAll();
+        CleanupResources();
+        }
     }      
     private void SetupBluetoothHandler()
       {
@@ -269,7 +270,8 @@ public partial class App : IDisposable
 
         using var cts = new CancellationTokenSource(_settings.DefaultConnectionTimeoutMs);
         await _bleManagers[deviceKey].ConnectAsync();
-    }    private async Task RunScanningLoop()
+    }  
+    private async Task RunScanningLoop()
     {
         ThrowIfDisposed();
         using var scanTimeoutCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(_settings.DefaultScanTimeoutMs));
@@ -311,13 +313,15 @@ public partial class App : IDisposable
                 {
                     _logger.LogInfo("Exiting due to scan timeout");
                     Console.WriteLine("Exiting due to scan timeout");
+                    CleanupResources();
+                    await Task.Delay(100); 
                     Environment.Exit(1);
+                    return;
                 }
                 break;
             }
         }
     }
-
     private async Task HandleUserInput(CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -325,10 +329,10 @@ public partial class App : IDisposable
         {
             try
             {
-                if (Console.KeyAvailable && !_config.SendKeys)
+                if (!_config.SendKeys && Console.In.Peek() >= 0)
                 {
-                    var key = Console.ReadKey(true);
-                    if (key.KeyChar.ToString() == _settings.QuitKey)
+                    int input = Console.Read();
+                    if (input == _settings.QuitKey[0])
                     {
                         _logger.LogInfo("Shutting down...");
                         Console.WriteLine("Shutting down...");
@@ -336,14 +340,14 @@ public partial class App : IDisposable
                         return;
                     }
                 }
-                await Task.Delay(100, ct); // Reduced polling frequency
+                await Task.Delay(100, ct);
             }
             catch (OperationCanceledException)
             {
                 return;
             }
         }
-    }    
+    }
     private void CleanupResources()
     {
         if (_disposed) return;
